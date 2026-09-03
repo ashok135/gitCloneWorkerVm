@@ -21,17 +21,21 @@ function runCommand(cmd, cwd, deployment) {
       maxBuffer: 10 * 1024 * 1024,
     });
 
-    child.stdout?.on('data', (data) => {
-      const lines = data.toString().split('\n').filter(Boolean);
-      deployment.logs.push(...lines);
-      eventBus.emit(`update:${deployment.id}`, deployment);
-    });
+    if (child.stdout) {
+      child.stdout.on('data', (data) => {
+        const lines = data.toString().split('\n').filter(Boolean);
+        deployment.logs.push(...lines);
+        eventBus.emit(`update:${deployment.id}`, deployment);
+      });
+    }
 
-    child.stderr?.on('data', (data) => {
-      const lines = data.toString().split('\n').filter(Boolean);
-      deployment.logs.push(...lines);
-      eventBus.emit(`update:${deployment.id}`, deployment);
-    });
+    if (child.stderr) {
+      child.stderr.on('data', (data) => {
+        const lines = data.toString().split('\n').filter(Boolean);
+        deployment.logs.push(...lines);
+        eventBus.emit(`update:${deployment.id}`, deployment);
+      });
+    }
 
     child.on('close', (code) => {
       if (code === 0) {
