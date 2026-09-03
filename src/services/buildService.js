@@ -124,7 +124,8 @@ async function executeBuildPipeline(deployment) {
     eventBus.emit(`update:${deployment.id}`, deployment);
 
   } catch (err) {
-    deployment.step = -1;
+    const failedStep = deployment.step || 1;
+    deployment.step = -failedStep;
     deployment.status = 'failed';
     deployment.error = err.message || 'Build failed';
     deployment.logs.push(`❌ Error: ${deployment.error}`);
