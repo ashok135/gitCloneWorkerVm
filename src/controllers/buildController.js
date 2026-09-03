@@ -15,7 +15,11 @@ function triggerBuild(req, res) {
   const id = deploymentId || `dep_${Date.now()}`;
   const name = repoName || 'my-project';
 
-  createDeployment(id, name, repositoryUrl);
+  const { PUBLIC_HOST } = require('../config/env');
+  const hostFromReq = req.get('host') ? req.get('host').split(':')[0] : null;
+  const host = (PUBLIC_HOST && PUBLIC_HOST !== 'localhost') ? PUBLIC_HOST : (hostFromReq || 'localhost');
+
+  createDeployment(id, name, repositoryUrl, host);
 
   res.status(202).json({
     message: 'Build accepted by worker',

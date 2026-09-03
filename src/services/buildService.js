@@ -112,7 +112,8 @@ async function executeBuildPipeline(deployment) {
 
     runningServers.set(deployment.id, server);
 
-    const liveUrl = `http://${PUBLIC_HOST}:${port}`;
+    const hostToUse = deployment.host || PUBLIC_HOST || 'localhost';
+    const liveUrl = `http://${hostToUse}:${port}`;
     deployment.url = liveUrl;
 
     // ----------------------------------------------------
@@ -136,11 +137,12 @@ async function executeBuildPipeline(deployment) {
 /**
  * Register a new build job and start pipeline
  */
-function createDeployment(id, repoName, repoUrl) {
+function createDeployment(id, repoName, repoUrl, host) {
   const deployment = {
     id,
     repoName,
     repoUrl,
+    host,
     step: 1,
     status: 'cloning',
     logs: [`[${new Date().toLocaleTimeString()}] Worker accepted build for ${repoName}`],
