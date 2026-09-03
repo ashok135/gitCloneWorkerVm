@@ -1,0 +1,91 @@
+const { createDeployment, getDeployment, getRunningCount } = require('../services/buildService');
+const eventBus = require('../events/eventBus');
+
+/**
+ * Trigger a new build on the worker
+ * POST /build
+ */
+function triggerBuild(req, res) {
+  const { deploymentId, repositoryUrl, repoName } = req.body;
+
+  if (!repositoryUrl) {
+    return res.status(400).json({ error: 'repositoryUrl is required' });
+  }
+
+  const id = deploymentId || `dep_${Date.now()}`;
+  const name = repoName || 'my-project';
+
+  createDeployment(id, name, repositoryUrl);
+
+  res.status(202).json({
+    message: 'Build accepted by worker',
+    deploymentId: id,
+    status: 'cloning',
+  });
+}
+
+/**
+ * Poll current build status & logs
+ * GET /status/:id
+ */
+function getBuildStatus(req, res) {
+  const deployment = getDeployment(req.params.id);
+  if (!deployment) {
+    return res.status(404).json({ error: 'Deployment not found' });
+  }
+  res.json(deployment);
+}
+
+/**
+ * Stream real-time build progress via Server-Sent Events (SSE)
+ * GET /stream/:id
+ */
+function streamBuildProgress(req, res) {
+  const deployment = getDeployment(req.params.id);
+  if (!deployment) {
+    return res.status(404).json({ error: 'Deployment not found' });
+  }
+
+  // Set SSE Headers
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('Connection', 'keep-alive');
+  res.flushHeaders();
+
+  // 1. Send current state immediately
+  res.write(`data: ${JSON.stringify(deployment)}\n\n`);
+
+  // 2. Stream subsequent updates
+  const onUpdate = (data) => {
+    res.write(`data: ${JSON.stringify(data)}\n\n`);
+    if (data.step === 4 || data.step === -1) {
+      res.end();
+    }
+  };
+
+  eventBus.on(`update:${deployment.id}`, onUpdate);
+
+  // 3. Clean up on connection close
+  req.on('close', () => {
+    eventBus.off(`update:${deployment.id}`, onUpdate);
+  });
+}
+
+/**
+ * Worker health check
+ * GET /health
+ */
+function getHealth(req, res) {
+  res.json({
+    status: 'ok',
+    uptime: process.uptime(),
+    activeSandboxes: getRunningCount(),
+  });
+}
+
+module.exports = {
+  triggerBuild,
+  getBuildStatus,
+  streamBuildProgress,
+  getHealth,
+};
