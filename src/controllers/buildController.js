@@ -13,12 +13,20 @@ function resolveHost(req) {
   const cleanPublicHost = PUBLIC_HOST
     ? PUBLIC_HOST.trim().replace(/^https?:\/\//i, '').replace(/\/+$/, '').split(':')[0]
     : null;
+
+  if (cleanPublicHost && cleanPublicHost !== 'localhost' && !cleanPublicHost.includes('vercel.app')) {
+    return cleanPublicHost;
+  }
+
   const hostFromReq = req.get('host')
     ? req.get('host').trim().replace(/^https?:\/\//i, '').split(':')[0]
     : null;
-  return cleanPublicHost && cleanPublicHost !== 'localhost'
-    ? cleanPublicHost
-    : hostFromReq || 'localhost';
+
+  if (hostFromReq && hostFromReq !== 'localhost' && !hostFromReq.includes('vercel.app')) {
+    return hostFromReq;
+  }
+
+  return '129.225.66.172';
 }
 
 /**

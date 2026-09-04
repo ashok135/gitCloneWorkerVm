@@ -71,11 +71,15 @@ async function launchPreviewServer(targetDir, deployment, onExpire, emitUpdate) 
   registerServer(deployment.id, server);
 
   // 5. Compute public URL
-  const rawHost = (deployment.host || PUBLIC_HOST || 'localhost').trim();
-  const cleanHost = rawHost
+  const rawHost = (deployment.host || PUBLIC_HOST || '129.225.66.172').trim();
+  let cleanHost = rawHost
     .replace(/^https?:\/\//i, '')
     .replace(/\/+$/, '')
-    .split(':')[0] || 'localhost';
+    .split(':')[0] || '129.225.66.172';
+
+  if (cleanHost === 'localhost' || cleanHost === '127.0.0.1' || cleanHost.includes('vercel.app')) {
+    cleanHost = '129.225.66.172';
+  }
 
   const liveUrl = `http://${cleanHost}:${port}`;
   deployment.url = liveUrl;
