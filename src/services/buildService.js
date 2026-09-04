@@ -30,31 +30,33 @@ function emitUpdate(id, deployment) {
  */
 async function stopAndRemoveDeployment(id, reason = 'manual') {
   const deployment = getDeployment(id);
-  if (!deployment) return false;
 
   // 1. Clear TTL timer
   clearTtlTimer(id);
 
-  // 2. Stop running Express preview server
+  // 2. Stop running Express preview server immediately
   closeServer(id);
 
-  // 3. Delete the sandbox directory from VM disk
-  const targetDir = path.join(SANDBOXES_DIR, id);
-  if (fs.existsSync(targetDir)) {
-    try {
-      await fs.promises.rm(targetDir, { recursive: true, force: true });
-      console.log(`🗑️ Deleted sandbox directory ${targetDir}`);
-    } catch (err) {
-      console.error(`Error deleting sandbox directory ${targetDir}:`, err);
-    }
-  }
+  // 3. Remove deployment from registry immediately
+  deleteDeployment(id);
 
   // 4. Update deployment state & emit event
-  deployment.status = reason === 'auto-expired' ? 'expired' : 'stopped';
-  deployment.step = -99;
-  deployment.url = null;
-  deployment.logs.push(`🛑 Sandbox terminated (${reason}) and disk cleaned.`);
-  emitUpdate(id, deployment);
+  if (deployment) {
+    deployment.status = reason === 'auto-expired' ? 'expired' : 'stopped';
+    deployment.step = -99;
+    deployment.url = null;
+    deployment.logs.push(`🛑 Sandbox terminated (${reason}) and disk cleaned.`);
+    emitUpdate(id, deployment);
+  }
+
+  // 5. Delete the sandbox directory from VM disk asynchronously in background (no HTTP lag)
+  const targetDir = path.join(SANDBOXES_DIR, id);
+  if (fs.existsSync(targetDir)) {
+    fs.promises
+      .rm(targetDir, { recursive: true, force: true })
+      .then(() => console.log(`🗑️ Deleted sandbox directory ${targetDir}`))
+      .catch((err) => console.error(`Error deleting sandbox directory ${targetDir}:`, err.message));
+  }
 
   return true;
 }

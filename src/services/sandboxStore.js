@@ -35,6 +35,43 @@ try {
   console.warn('Could not load deployments registry:', e.message);
 }
 
+function inferRepoNameFromDisk(targetDir, fallbackId) {
+  try {
+    const pkgPath = path.join(targetDir, 'package.json');
+    if (fs.existsSync(pkgPath)) {
+      const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf8'));
+      if (pkg.name && typeof pkg.name === 'string' && pkg.name.trim()) {
+        return pkg.name.trim();
+      }
+    }
+
+    const gitConfigPath = path.join(targetDir, '.git', 'config');
+    if (fs.existsSync(gitConfigPath)) {
+      const gitConfig = fs.readFileSync(gitConfigPath, 'utf8');
+      const match = gitConfig.match(/url\s*=\s*.*\/([^\/\s]+?)(\.git)?$/m);
+      if (match && match[1]) {
+        return match[1].replace(/\.git$/i, '');
+      }
+    }
+
+    const files = fs.readdirSync(targetDir);
+    const htmlFile = files.find((f) => f.toLowerCase().endsWith('.html'));
+    if (htmlFile) {
+      if (htmlFile.toLowerCase() !== 'index.html') {
+        return htmlFile.replace(/\.[^/.]+$/, '');
+      }
+      const htmlContent = fs.readFileSync(path.join(targetDir, htmlFile), 'utf8');
+      const titleMatch = htmlContent.match(/<title[^>]*>([^<]+)<\/title>/i);
+      if (titleMatch && titleMatch[1]?.trim()) {
+        return titleMatch[1].trim();
+      }
+    }
+  } catch (e) {}
+
+  const shortSuffix = fallbackId.replace(/^dep_/, '').slice(-4);
+  return `Project-${shortSuffix || 'sandbox'}`;
+}
+
 // 3. Scan for existing sandbox directories on disk
 try {
   const entries = fs.readdirSync(SANDBOXES_DIR);
@@ -42,9 +79,10 @@ try {
     if (entry.startsWith('dep_') && !deployments.has(entry)) {
       const full = path.join(SANDBOXES_DIR, entry);
       if (fs.statSync(full).isDirectory()) {
+        const repoName = inferRepoNameFromDisk(full, entry);
         deployments.set(entry, {
           id: entry,
-          repoName: entry,
+          repoName,
           status: 'live',
           step: 4,
           createdAt: fs.statSync(full).birthtime?.toISOString() || new Date().toISOString(),
