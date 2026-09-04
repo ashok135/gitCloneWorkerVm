@@ -70,28 +70,61 @@ async function executeBuildPipeline(deployment) {
 
   try {
     // ----------------------------------------------------
-    // STEP 1: CLONING REPOSITORY
+    // STEP 1: CLONING REPOSITORY / UNPACKING FILES
     // ----------------------------------------------------
     deployment.step = 1;
-    deployment.status = 'cloning';
-    deployment.logs.push(`Cloning repository ${deployment.repoUrl}...`);
-    eventBus.emit(`update:${deployment.id}`, deployment);
+    if (deployment.isUpload) {
+      deployment.status = 'unpacking';
+      deployment.logs.push(`Unpacking ${deployment.files?.length || 0} uploaded project files into sandbox...`);
+      eventBus.emit(`update:${deployment.id}`, deployment);
 
-    if (fs.existsSync(targetDir)) {
-      await fs.promises.rm(targetDir, { recursive: true, force: true });
-    }
-
-    await runCommand(
-      `git clone --depth 1 "${deployment.repoUrl}" "${targetDir}"`,
-      SANDBOXES_DIR,
-      (log) => {
-        deployment.logs.push(log);
-        eventBus.emit(`update:${deployment.id}`, deployment);
+      if (fs.existsSync(targetDir)) {
+        await fs.promises.rm(targetDir, { recursive: true, force: true });
       }
-    );
+      fs.mkdirSync(targetDir, { recursive: true });
 
-    deployment.logs.push('✓ Repository cloned successfully.');
-    eventBus.emit(`update:${deployment.id}`, deployment);
+      if (Array.isArray(deployment.files)) {
+        for (const file of deployment.files) {
+          if (!file || !file.path) continue;
+          // Protect against directory traversal
+          const safePath = path.normalize(file.path).replace(/^(\.\.[\/\\])+/, '');
+          const fullFilePath = path.join(targetDir, safePath);
+          const dirName = path.dirname(fullFilePath);
+          if (!fs.existsSync(dirName)) {
+            fs.mkdirSync(dirName, { recursive: true });
+          }
+          if (file.encoding === 'base64') {
+            fs.writeFileSync(fullFilePath, Buffer.from(file.content, 'base64'));
+          } else {
+            fs.writeFileSync(fullFilePath, file.content || '', 'utf8');
+          }
+        }
+      }
+      // Reclaim memory after writing to disk
+      delete deployment.files;
+      deployment.logs.push('✓ Files unpacked successfully into sandbox.');
+      eventBus.emit(`update:${deployment.id}`, deployment);
+    } else {
+      deployment.status = 'cloning';
+      deployment.logs.push(`Cloning repository ${deployment.repoUrl}...`);
+      eventBus.emit(`update:${deployment.id}`, deployment);
+
+      if (fs.existsSync(targetDir)) {
+        await fs.promises.rm(targetDir, { recursive: true, force: true });
+      }
+
+      await runCommand(
+        `git clone --depth 1 "${deployment.repoUrl}" "${targetDir}"`,
+        SANDBOXES_DIR,
+        (log) => {
+          deployment.logs.push(log);
+          eventBus.emit(`update:${deployment.id}`, deployment);
+        }
+      );
+
+      deployment.logs.push('✓ Repository cloned successfully.');
+      eventBus.emit(`update:${deployment.id}`, deployment);
+    }
 
     // ----------------------------------------------------
     // ENVIRONMENT SETUP & DETECTION (.env, .env.example)
@@ -325,6 +358,44 @@ function createDeployment(id, repoName, repoUrl, host, envVars) {
   return deployment;
 }
 
+function createDeploymentFromFiles(id, repoName, files, host, envVars) {
+  const deployment = {
+    id,
+    repoName,
+    isUpload: true,
+    files,
+    host,
+    envVars,
+    step: 1,
+    status: 'unpacking',
+    logs: [`[${new Date().toLocaleTimeString()}] Worker accepted file upload bundle for ${repoName}`],
+    createdAt: new Date().toISOString(),
+  };
+
+  deployments.set(id, deployment);
+  executeBuildPipeline(deployment);
+  return deployment;
+}
+
+function getAllDeployments() {
+  return Array.from(deployments.values())
+    .map((d) => ({
+      id: d.id,
+      repoName: d.repoName,
+      repoUrl: d.repoUrl,
+      isUpload: Boolean(d.isUpload),
+      status: d.status,
+      step: d.step,
+      port: d.port,
+      url: d.url,
+      createdAt: d.createdAt,
+      expiresAt: d.expiresAt,
+      ttlMinutes: d.ttlMinutes,
+      detectedEnv: d.detectedEnv,
+    }))
+    .reverse();
+}
+
 function getDeployment(id) {
   return deployments.get(id);
 }
@@ -335,6 +406,8 @@ function getRunningCount() {
 
 module.exports = {
   createDeployment,
+  createDeploymentFromFiles,
+  getAllDeployments,
   getDeployment,
   getRunningCount,
   stopAndRemoveDeployment,

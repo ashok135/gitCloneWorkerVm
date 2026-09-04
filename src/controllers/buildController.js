@@ -1,8 +1,28 @@
-const { createDeployment, getDeployment, getRunningCount, stopAndRemoveDeployment } = require('../services/buildService');
+const {
+  createDeployment,
+  createDeploymentFromFiles,
+  getAllDeployments,
+  getDeployment,
+  getRunningCount,
+  stopAndRemoveDeployment,
+} = require('../services/buildService');
 const eventBus = require('../events/eventBus');
 
+function resolveHost(req) {
+  const { PUBLIC_HOST } = require('../config/env');
+  const cleanPublicHost = PUBLIC_HOST
+    ? PUBLIC_HOST.trim().replace(/^https?:\/\//i, '').replace(/\/+$/, '').split(':')[0]
+    : null;
+  const hostFromReq = req.get('host')
+    ? req.get('host').trim().replace(/^https?:\/\//i, '').split(':')[0]
+    : null;
+  return cleanPublicHost && cleanPublicHost !== 'localhost'
+    ? cleanPublicHost
+    : hostFromReq || 'localhost';
+}
+
 /**
- * Trigger a new build on the worker
+ * Trigger a new build on the worker from Git
  * POST /build
  */
 function triggerBuild(req, res) {
@@ -14,17 +34,7 @@ function triggerBuild(req, res) {
 
   const id = deploymentId || `dep_${Date.now()}`;
   const name = repoName || 'my-project';
-
-  const { PUBLIC_HOST } = require('../config/env');
-  const cleanPublicHost = PUBLIC_HOST
-    ? PUBLIC_HOST.trim().replace(/^https?:\/\//i, '').replace(/\/+$/, '').split(':')[0]
-    : null;
-  const hostFromReq = req.get('host')
-    ? req.get('host').trim().replace(/^https?:\/\//i, '').split(':')[0]
-    : null;
-  const host = (cleanPublicHost && cleanPublicHost !== 'localhost')
-    ? cleanPublicHost
-    : (hostFromReq || 'localhost');
+  const host = resolveHost(req);
 
   createDeployment(id, name, repositoryUrl, host, envVars);
 
@@ -32,6 +42,42 @@ function triggerBuild(req, res) {
     message: 'Build accepted by worker',
     deploymentId: id,
     status: 'cloning',
+  });
+}
+
+/**
+ * Trigger a new build on the worker from uploaded files (Folder / ZIP)
+ * POST /deploy-files
+ */
+function deployFromFiles(req, res) {
+  const { deploymentId, repoName, files, envVars } = req.body;
+
+  if (!files || !Array.isArray(files) || files.length === 0) {
+    return res.status(400).json({ error: 'files array is required' });
+  }
+
+  const id = deploymentId || `dep_${Date.now()}`;
+  const name = repoName || 'uploaded-project';
+  const host = resolveHost(req);
+
+  createDeploymentFromFiles(id, name, files, host, envVars);
+
+  res.status(202).json({
+    message: 'Uploaded project files accepted by worker',
+    deploymentId: id,
+    status: 'unpacking',
+  });
+}
+
+/**
+ * Get all active and running sandboxes
+ * GET /sandboxes
+ */
+function getActiveSandboxes(req, res) {
+  const sandboxes = getAllDeployments();
+  res.json({
+    count: sandboxes.length,
+    sandboxes,
   });
 }
 
@@ -109,6 +155,8 @@ function getHealth(req, res) {
 
 module.exports = {
   triggerBuild,
+  deployFromFiles,
+  getActiveSandboxes,
   getBuildStatus,
   streamBuildProgress,
   stopSandbox,
