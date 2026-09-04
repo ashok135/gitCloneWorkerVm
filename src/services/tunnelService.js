@@ -16,9 +16,13 @@ function startTunnel(deploymentId, port) {
     try {
       console.log(`🚇 Spawning dedicated Cloudflare quick-tunnel for ${deploymentId} on port ${port}...`);
 
-      const proc = spawn('cloudflared', ['tunnel', '--url', `http://127.0.0.1:${port}`], {
-        stdio: ['ignore', 'pipe', 'pipe'],
-      });
+      const proc = spawn(
+        'cloudflared',
+        ['tunnel', '--url', `http://127.0.0.1:${port}`, '--metrics', 'localhost:0'],
+        {
+          stdio: ['ignore', 'pipe', 'pipe'],
+        }
+      );
 
       activeTunnels.set(deploymentId, proc);
 
