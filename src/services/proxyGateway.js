@@ -1,5 +1,4 @@
 const http = require('http');
-const { getAllDeployments } = require('./sandboxStore');
 
 const WORKER_RESERVED_ROUTES = [
   '/build',
@@ -13,20 +12,9 @@ const WORKER_RESERVED_ROUTES = [
 ];
 
 /**
- * Parses cookies from cookie header
- */
-function parseCookies(cookieHeader) {
-  const list = {};
-  if (!cookieHeader) return list;
-  cookieHeader.split(';').forEach((cookie) => {
-    const parts = cookie.split('=');
-    list[parts.shift().trim()] = decodeURI(parts.join('='));
-  });
-  return list;
-}
-
-/**
- * Resolves which internal sandbox port to target
+ * Resolves which internal sandbox port to target.
+ * ONLY routes when explicitly requested via path (/p/PORT) or query (?_port=PORT or ?port=PORT).
+ * NEVER routes by cookie or implicit fallback, to protect the worker root on port 4000.
  */
 function resolveTarget(req) {
   const urlPath = req.path || req.url || '/';
@@ -38,7 +26,7 @@ function resolveTarget(req) {
     }
   }
 
-  // 1. Path prefix: /p/4001 or /p/4001/index.html
+  // 1. Explicit path prefix: /p/4001 or /p/4001/index.html
   const pathMatch = req.url.match(/^\/p\/(\d+)(\/.*)?$/);
   if (pathMatch) {
     return {
@@ -47,31 +35,25 @@ function resolveTarget(req) {
     };
   }
 
-  // 2. Query param ?_port=4001 or ?port=4001
+  // 2. Explicit query param: ?_port=4001 or ?port=4001
   try {
     const urlObj = new URL(req.url, 'http://localhost');
     const queryPort = urlObj.searchParams.get('_port') || urlObj.searchParams.get('port');
     if (queryPort) {
-      return {
-        port: parseInt(queryPort, 10),
-        url: req.url,
-      };
+      const port = parseInt(queryPort, 10);
+      if (!isNaN(port) && port >= 4001) {
+        return {
+          port,
+          url: req.url,
+        };
+      }
     }
   } catch (e) {}
 
   // 3. Custom Header: x-sandbox-port
   const headerPort = req.headers['x-sandbox-port'];
   if (headerPort) {
-    return {
-      port: parseInt(headerPort, 10),
-      url: req.url,
-    };
-  }
-
-  // 4. Cookie: sandbox_port
-  const cookies = parseCookies(req.headers.cookie);
-  if (cookies.sandbox_port) {
-    const port = parseInt(cookies.sandbox_port, 10);
+    const port = parseInt(headerPort, 10);
     if (!isNaN(port) && port >= 4001) {
       return {
         port,
@@ -108,8 +90,10 @@ function proxyToSandbox(targetPort, targetUrl, req, res) {
     headers['content-security-policy'] = 'frame-ancestors *';
     headers['access-control-allow-origin'] = '*';
 
-    // Set cookie so future asset calls from this tab stay on this sandbox port
-    headers['set-cookie'] = `sandbox_port=${targetPort}; Path=/; SameSite=Lax`;
+    // Clear any stale sandbox_port cookies from previous sessions
+    if (req.headers.cookie && req.headers.cookie.includes('sandbox_port=')) {
+      headers['set-cookie'] = 'sandbox_port=; Path=/; Expires=Thu, 01 Jan 1970 00:00:00 GMT; Max-Age=0';
+    }
 
     res.writeHead(proxyRes.statusCode, headers);
     proxyRes.pipe(res, { end: true });
@@ -134,6 +118,11 @@ function proxyToSandbox(targetPort, targetUrl, req, res) {
  * Express middleware
  */
 function reverseProxyMiddleware(req, res, next) {
+  // Clear any old stale sandbox_port cookies to prevent domain hijacking
+  if (req.headers.cookie && req.headers.cookie.includes('sandbox_port=')) {
+    res.setHeader('Set-Cookie', 'sandbox_port=; Path=/; Expires=Thu, 01 Jan 1970 00:00:00 GMT; Max-Age=0');
+  }
+
   const target = resolveTarget(req);
   if (target) {
     return proxyToSandbox(target.port, target.url, req, res);

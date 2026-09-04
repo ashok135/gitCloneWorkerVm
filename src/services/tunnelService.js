@@ -5,8 +5,8 @@ const activeTunnels = new Map();
 
 /**
  * Spawns an isolated cloudflared quick tunnel for the given port.
- * Resolves with the unique https://xxx.trycloudflare.com URL as soon as Cloudflare provisions it.
- * Falls back cleanly (null) if cloudflared is unavailable or times out.
+ * Uses HTTP/2 protocol over TCP port 443 (reliable on Oracle Cloud / cloud VMs)
+ * and an isolated metrics port based on the sandbox port to avoid collisions.
  */
 function startTunnel(deploymentId, port) {
   return new Promise((resolve) => {
@@ -14,14 +14,18 @@ function startTunnel(deploymentId, port) {
     stopTunnel(deploymentId);
 
     try {
-      console.log(`🚇 Spawning dedicated Cloudflare quick-tunnel for ${deploymentId} on port ${port}...`);
+      const parsedPort = parseInt(port, 10) || 4001;
+      const metricsPort = 20000 + (parsedPort - 4000);
+
+      console.log(`🚇 Spawning dedicated Cloudflare tunnel for ${deploymentId} on port ${parsedPort} (metrics: ${metricsPort})...`);
 
       const proc = spawn(
         'cloudflared',
         [
           'tunnel',
-          '--url', `http://127.0.0.1:${port}`,
-          '--metrics', '127.0.0.1:0',
+          '--url', `http://127.0.0.1:${parsedPort}`,
+          '--protocol', 'http2',
+          '--metrics', `127.0.0.1:${metricsPort}`,
           '--no-autoupdate',
         ],
         {
@@ -38,26 +42,33 @@ function startTunnel(deploymentId, port) {
       const timeout = setTimeout(() => {
         if (!resolved) {
           resolved = true;
-          console.warn(`⚠️ Cloudflare tunnel startup timed out for ${deploymentId} after 20s`);
-          console.warn(`⚠️ cloudflared stderr so far:\n${stderrBuffer}`);
+          console.warn(`⚠️ Cloudflare tunnel startup timed out for ${deploymentId} after 25s`);
+          if (stderrBuffer) {
+            console.warn(`⚠️ cloudflared output:\n${stderrBuffer.slice(-500)}`);
+          }
           resolve(null);
         }
-      }, 20000);
+      }, 25000);
 
       const inspectOutput = (chunk) => {
         const text = chunk.toString();
-        stderrBuffer += text;
+        // Keep only the last 2000 characters of log buffer to save memory
+        stderrBuffer = (stderrBuffer + text).slice(-2000);
+
         // Match Cloudflare generated hostname: https://<random>.trycloudflare.com
         const match = text.match(/https:\/\/[a-zA-Z0-9.-]+\.trycloudflare\.com/);
         if (match && !resolved) {
           resolved = true;
           clearTimeout(timeout);
           const tunnelUrl = match[0];
-          // Update the stored tunnel info with the URL
           const entry = activeTunnels.get(deploymentId);
           if (entry) entry.url = tunnelUrl;
           console.log(`✓ Dedicated tunnel provisioned for ${deploymentId}: ${tunnelUrl}`);
-          resolve(tunnelUrl);
+
+          // Give Cloudflare edge 2 seconds to propagate DNS before resolving
+          setTimeout(() => {
+            resolve(tunnelUrl);
+          }, 2000);
         }
       };
 
@@ -109,7 +120,7 @@ function stopTunnel(deploymentId) {
               proc.kill('SIGKILL');
             }
           } catch {}
-        }, 1200);
+        }, 1000);
       }
     } catch (e) {
       console.warn(`Error stopping tunnel for ${deploymentId}:`, e.message);
