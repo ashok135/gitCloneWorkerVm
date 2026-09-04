@@ -203,18 +203,37 @@ async function executeBuildPipeline(deployment) {
     const isExplicitBackend = deployment.projectType === 'backend';
     const isExplicitFrontend = deployment.projectType === 'frontend';
 
+    // Check if HTML files exist in working directory or public/
+    let hasHtml = false;
+    try {
+      hasHtml =
+        fs.existsSync(path.join(workingDir, 'index.html')) ||
+        fs.existsSync(path.join(workingDir, 'public', 'index.html')) ||
+        fs.readdirSync(workingDir).some((f) => f.toLowerCase().endsWith('.html'));
+    } catch {}
+
     const deps = { ...(pkg?.dependencies || {}), ...(pkg?.devDependencies || {}) };
     const hasBackendDeps = Boolean(
-      deps.express || deps.fastify || deps.koa || deps['@nestjs/core'] || deps.cors
+      deps.express ||
+        deps.fastify ||
+        deps.koa ||
+        deps['@nestjs/core'] ||
+        deps.hono ||
+        deps.polka ||
+        deps.restify ||
+        deps.hapi ||
+        deps.mongoose ||
+        deps.pg ||
+        deps.mysql2
     );
-    const hasBackendEntry =
-      fs.existsSync(path.join(workingDir, 'server.js')) ||
-      fs.existsSync(path.join(workingDir, 'app.js')) ||
-      (fs.existsSync(path.join(workingDir, 'index.js')) && !hasBuildScript);
 
+    // If an HTML file exists, it's a frontend web app, unless user explicitly selected 'backend'
     const isBackend =
       isExplicitBackend ||
-      (!isExplicitFrontend && !hasBuildScript && (hasBackendDeps || hasBackendEntry));
+      (!isExplicitFrontend &&
+        !hasHtml &&
+        !hasBuildScript &&
+        (hasBackendDeps || (fs.existsSync(path.join(workingDir, 'server.js')) && !hasHtml)));
 
     deployment.isBackend = isBackend;
 
@@ -289,8 +308,11 @@ async function executeBuildPipeline(deployment) {
       });
 
       child.on('exit', (code) => {
-        if (deployment.status === 'live') {
-          deployment.logs.push(`⚠️ Backend process exited with code ${code}`);
+        if (code !== 0) {
+          deployment.logs.push(`❌ Backend process exited with error code ${code}`);
+          deployment.status = 'failed';
+          deployment.step = -3;
+          deployment.url = null;
           notify();
         }
       });
