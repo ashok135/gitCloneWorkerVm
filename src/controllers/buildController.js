@@ -16,8 +16,15 @@ function triggerBuild(req, res) {
   const name = repoName || 'my-project';
 
   const { PUBLIC_HOST } = require('../config/env');
-  const hostFromReq = req.get('host') ? req.get('host').split(':')[0] : null;
-  const host = (PUBLIC_HOST && PUBLIC_HOST !== 'localhost') ? PUBLIC_HOST : (hostFromReq || 'localhost');
+  const cleanPublicHost = PUBLIC_HOST
+    ? PUBLIC_HOST.trim().replace(/^https?:\/\//i, '').replace(/\/+$/, '').split(':')[0]
+    : null;
+  const hostFromReq = req.get('host')
+    ? req.get('host').trim().replace(/^https?:\/\//i, '').split(':')[0]
+    : null;
+  const host = (cleanPublicHost && cleanPublicHost !== 'localhost')
+    ? cleanPublicHost
+    : (hostFromReq || 'localhost');
 
   createDeployment(id, name, repositoryUrl, host);
 

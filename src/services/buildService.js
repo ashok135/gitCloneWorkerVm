@@ -112,8 +112,13 @@ async function executeBuildPipeline(deployment) {
 
     runningServers.set(deployment.id, server);
 
-    const hostToUse = deployment.host || PUBLIC_HOST || 'localhost';
-    const liveUrl = `http://${hostToUse}:${port}`;
+    let rawHost = (deployment.host || PUBLIC_HOST || 'localhost').trim();
+    // Strip leading protocol (http:// or https://) and trailing slashes if passed in .env or headers
+    let cleanHost = rawHost.replace(/^https?:\/\//i, '').replace(/\/+$/, '');
+    // If the host included a port (e.g. 129.225.66.172:4000), strip it so we don't end up with host:4000:4001
+    cleanHost = cleanHost.split(':')[0] || 'localhost';
+
+    const liveUrl = `http://${cleanHost}:${port}`;
     deployment.url = liveUrl;
 
     // ----------------------------------------------------
