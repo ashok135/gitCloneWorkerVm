@@ -31,6 +31,19 @@ async function unpackFiles(targetDir, files, deployment, emitUpdate) {
     }
   }
 
+  // Auto-alias: if no index.html exists, but an HTML file was uploaded, copy to index.html
+  const indexPath = path.join(targetDir, 'index.html');
+  if (!fs.existsSync(indexPath)) {
+    try {
+      const allFiles = fs.readdirSync(targetDir);
+      const anyHtml = allFiles.find((f) => f.toLowerCase().endsWith('.html'));
+      if (anyHtml) {
+        fs.copyFileSync(path.join(targetDir, anyHtml), indexPath);
+        deployment.logs.push(`✓ Auto-aliased ${anyHtml} -> index.html for direct browser hosting.`);
+      }
+    } catch (e) {}
+  }
+
   // Free memory after writing files to disk
   delete deployment.files;
 

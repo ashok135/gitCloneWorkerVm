@@ -48,7 +48,14 @@ async function launchPreviewServer(targetDir, deployment, onExpire, emitUpdate) 
     if (fs.existsSync(indexHtml)) {
       res.sendFile(indexHtml);
     } else {
-      res.status(404).send('<h3>Mini Vercel: No index.html found in build output</h3>');
+      try {
+        const files = fs.readdirSync(staticDir);
+        const htmlFile = files.find((f) => f.toLowerCase().endsWith('.html'));
+        if (htmlFile) {
+          return res.sendFile(path.join(staticDir, htmlFile));
+        }
+      } catch (e) {}
+      res.status(404).send('<h3>Mini Vercel: No HTML files found in preview output</h3>');
     }
   });
 
