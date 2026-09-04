@@ -3,10 +3,16 @@ const cors = require('cors');
 const { PORT, PUBLIC_HOST } = require('./src/config/env');
 const buildRoutes = require('./src/routes/buildRoutes');
 
+const { reverseProxyMiddleware } = require('./src/services/proxyGateway');
+
 const app = express();
 
 // Middlewares
 app.use(cors());
+
+// Reverse Proxy Gateway: Forward traffic to sandbox ports (4001, 4002, etc.)
+app.use(reverseProxyMiddleware);
+
 app.use(express.json({ limit: '100mb' }));
 app.use(express.urlencoded({ extended: true, limit: '100mb' }));
 

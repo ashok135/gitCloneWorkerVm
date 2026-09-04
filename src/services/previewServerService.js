@@ -85,7 +85,7 @@ async function launchPreviewServer(targetDir, deployment, onExpire, emitUpdate) 
   }
 
   const liveUrl = cleanHost.includes('trycloudflare.com')
-    ? `https://${cleanHost}`
+    ? `https://${cleanHost}/?_port=${port}`
     : `http://${cleanHost}:${port}`;
   deployment.url = liveUrl;
 
