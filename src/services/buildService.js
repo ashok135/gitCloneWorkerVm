@@ -3,16 +3,63 @@ const fs = require('fs');
 const express = require('express');
 const { runCommand } = require('./commandRunner');
 const { getNextAvailablePort } = require('./portService');
-const { SANDBOXES_DIR, PUBLIC_HOST } = require('../config/env');
+const { SANDBOXES_DIR, PUBLIC_HOST, SANDBOX_TTL_MINUTES } = require('../config/env');
 const eventBus = require('../events/eventBus');
 
 // In-memory store for active deployments & running sandbox preview servers
 const deployments = new Map();
 const runningServers = new Map();
+const sandboxTimers = new Map();
 
 // Ensure sandboxes directory exists
 if (!fs.existsSync(SANDBOXES_DIR)) {
   fs.mkdirSync(SANDBOXES_DIR, { recursive: true });
+}
+
+/**
+ * Stop running server and remove sandbox directory from disk (Option 3 & Option 2)
+ */
+async function stopAndRemoveDeployment(id, reason = 'manual') {
+  const deployment = deployments.get(id);
+  if (!deployment) return false;
+
+  // 1. Clear TTL timer
+  if (sandboxTimers.has(id)) {
+    clearTimeout(sandboxTimers.get(id));
+    sandboxTimers.delete(id);
+  }
+
+  // 2. Stop running Express preview server
+  if (runningServers.has(id)) {
+    const server = runningServers.get(id);
+    try {
+      server.close();
+      console.log(`🛑 Closed preview server for ${id} on port ${deployment.port}`);
+    } catch (err) {
+      console.error(`Error closing server for ${id}:`, err);
+    }
+    runningServers.delete(id);
+  }
+
+  // 3. Delete the sandbox directory from VM disk
+  const targetDir = path.join(SANDBOXES_DIR, id);
+  if (fs.existsSync(targetDir)) {
+    try {
+      await fs.promises.rm(targetDir, { recursive: true, force: true });
+      console.log(`🗑️ Deleted sandbox directory ${targetDir}`);
+    } catch (err) {
+      console.error(`Error deleting sandbox directory ${targetDir}:`, err);
+    }
+  }
+
+  // 4. Update deployment state & emit event
+  deployment.status = reason === 'auto-expired' ? 'expired' : 'stopped';
+  deployment.step = -99;
+  deployment.url = null;
+  deployment.logs.push(`🛑 Sandbox terminated (${reason}) and disk cleaned.`);
+  eventBus.emit(`update:${id}`, deployment);
+
+  return true;
 }
 
 /**
@@ -31,46 +78,76 @@ async function executeBuildPipeline(deployment) {
     eventBus.emit(`update:${deployment.id}`, deployment);
 
     if (fs.existsSync(targetDir)) {
-      fs.rmSync(targetDir, { recursive: true, force: true });
+      await fs.promises.rm(targetDir, { recursive: true, force: true });
     }
 
-    await runCommand(`git clone --depth 1 "${deployment.repoUrl}" "${targetDir}"`, SANDBOXES_DIR, deployment);
+    await runCommand(
+      `git clone --depth 1 "${deployment.repoUrl}" "${targetDir}"`,
+      SANDBOXES_DIR,
+      (log) => {
+        deployment.logs.push(log);
+        eventBus.emit(`update:${deployment.id}`, deployment);
+      }
+    );
+
     deployment.logs.push('✓ Repository cloned successfully.');
     eventBus.emit(`update:${deployment.id}`, deployment);
 
     // ----------------------------------------------------
-    // STEP 2: INSTALLING DEPENDENCIES & BUILDING BUNDLE
+    // STEP 2: INSTALLING DEPENDENCIES
     // ----------------------------------------------------
     deployment.step = 2;
-    deployment.status = 'building';
-    deployment.logs.push('Compiling sandbox bundle...');
+    deployment.status = 'installing';
+    deployment.logs.push('Running npm install (memory-optimized)...');
     eventBus.emit(`update:${deployment.id}`, deployment);
 
     const packageJsonPath = path.join(targetDir, 'package.json');
     if (fs.existsSync(packageJsonPath)) {
-      let pkg = {};
-      try {
-        pkg = JSON.parse(fs.readFileSync(packageJsonPath, 'utf8'));
-      } catch (e) {}
-
-      deployment.logs.push('Running npm install (memory-optimized)...');
-      await runCommand('npm install --prefer-offline --no-audit --no-fund', targetDir, deployment);
+      await runCommand(
+        'npm install --prefer-offline --no-audit --no-fund',
+        targetDir,
+        (log) => {
+          deployment.logs.push(log);
+          eventBus.emit(`update:${deployment.id}`, deployment);
+        }
+      );
       deployment.logs.push('✓ Dependencies installed.');
-
-      if (pkg.scripts && pkg.scripts.build) {
-        deployment.logs.push('Running build script: npm run build...');
-        await runCommand('npm run build', targetDir, deployment);
-        deployment.logs.push('✓ Build completed successfully.');
-      } else {
-        deployment.logs.push('No "build" script in package.json. Skipping compile.');
-      }
     } else {
-      deployment.logs.push('No package.json found. Serving static directory.');
+      deployment.logs.push('ℹ No package.json found, skipping npm install.');
     }
     eventBus.emit(`update:${deployment.id}`, deployment);
 
     // ----------------------------------------------------
-    // STEP 3: SPAWN PREVIEW INSTANCE ON VM PORT
+    // STEP 3: COMPILING BUNDLE
+    // ----------------------------------------------------
+    let hasBuildScript = false;
+    if (fs.existsSync(packageJsonPath)) {
+      try {
+        const pkg = JSON.parse(fs.readFileSync(packageJsonPath, 'utf8'));
+        hasBuildScript = Boolean(pkg.scripts && pkg.scripts.build);
+      } catch (e) {}
+    }
+
+    if (hasBuildScript) {
+      deployment.step = 3;
+      deployment.status = 'building';
+      deployment.logs.push('Running build script: npm run build...');
+      eventBus.emit(`update:${deployment.id}`, deployment);
+
+      await runCommand(
+        'npm run build',
+        targetDir,
+        (log) => {
+          deployment.logs.push(log);
+          eventBus.emit(`update:${deployment.id}`, deployment);
+        }
+      );
+      deployment.logs.push('✓ Build script completed successfully.');
+      eventBus.emit(`update:${deployment.id}`, deployment);
+    }
+
+    // ----------------------------------------------------
+    // STEP 4: ALLOCATE PORT & START PREVIEW SERVER
     // ----------------------------------------------------
     deployment.step = 3;
     deployment.status = 'starting';
@@ -86,6 +163,17 @@ async function executeBuildPipeline(deployment) {
         staticDir = fullPath;
         break;
       }
+    }
+
+    // OPTION 1: Clean up node_modules to reclaim ~300-500MB disk space per sandbox
+    const nmPath = path.join(targetDir, 'node_modules');
+    if (fs.existsSync(nmPath)) {
+      fs.rm(nmPath, { recursive: true, force: true }, (rmErr) => {
+        if (!rmErr) {
+          deployment.logs.push('🧹 Option 1: Cleaned up node_modules to preserve VM disk space.');
+          eventBus.emit(`update:${deployment.id}`, deployment);
+        }
+      });
     }
 
     const port = await getNextAvailablePort(4001);
@@ -113,13 +201,28 @@ async function executeBuildPipeline(deployment) {
     runningServers.set(deployment.id, server);
 
     let rawHost = (deployment.host || PUBLIC_HOST || 'localhost').trim();
-    // Strip leading protocol (http:// or https://) and trailing slashes if passed in .env or headers
     let cleanHost = rawHost.replace(/^https?:\/\//i, '').replace(/\/+$/, '');
-    // If the host included a port (e.g. 129.225.66.172:4000), strip it so we don't end up with host:4000:4001
     cleanHost = cleanHost.split(':')[0] || 'localhost';
 
     const liveUrl = `http://${cleanHost}:${port}`;
     deployment.url = liveUrl;
+
+    // OPTION 2: Auto-expire TTL timer
+    const ttlMinutes = SANDBOX_TTL_MINUTES || 60;
+    const expiresAt = new Date(Date.now() + ttlMinutes * 60 * 1000).toISOString();
+    deployment.expiresAt = expiresAt;
+    deployment.ttlMinutes = ttlMinutes;
+
+    if (sandboxTimers.has(deployment.id)) {
+      clearTimeout(sandboxTimers.get(deployment.id));
+    }
+
+    const timer = setTimeout(async () => {
+      console.log(`⏳ Auto-expiring sandbox ${deployment.id} after ${ttlMinutes}m`);
+      await stopAndRemoveDeployment(deployment.id, 'auto-expired');
+    }, ttlMinutes * 60 * 1000);
+
+    sandboxTimers.set(deployment.id, timer);
 
     // ----------------------------------------------------
     // STEP 4: LIVE!
@@ -127,6 +230,7 @@ async function executeBuildPipeline(deployment) {
     deployment.step = 4;
     deployment.status = 'live';
     deployment.logs.push(`🎉 Deployment is LIVE at: ${liveUrl}`);
+    deployment.logs.push(`⏳ Option 2: Auto-teardown scheduled in ${ttlMinutes} mins to free resources.`);
     eventBus.emit(`update:${deployment.id}`, deployment);
 
   } catch (err) {
@@ -171,4 +275,5 @@ module.exports = {
   createDeployment,
   getDeployment,
   getRunningCount,
+  stopAndRemoveDeployment,
 };

@@ -3,6 +3,7 @@ const {
   triggerBuild,
   getBuildStatus,
   streamBuildProgress,
+  stopSandbox,
   getHealth,
 } = require('../controllers/buildController');
 
@@ -14,6 +15,8 @@ router.get('/', (req, res) => {
 router.post('/build', triggerBuild);
 router.get('/status/:id', getBuildStatus);
 router.get('/stream/:id', streamBuildProgress);
+router.delete('/sandbox/:id', stopSandbox);
+router.post('/stop/:id', stopSandbox);
 router.get('/health', getHealth);
 
 module.exports = router;

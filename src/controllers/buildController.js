@@ -1,4 +1,4 @@
-const { createDeployment, getDeployment, getRunningCount } = require('../services/buildService');
+const { createDeployment, getDeployment, getRunningCount, stopAndRemoveDeployment } = require('../services/buildService');
 const eventBus = require('../events/eventBus');
 
 /**
@@ -66,10 +66,10 @@ function streamBuildProgress(req, res) {
   // 1. Send current state immediately
   res.write(`data: ${JSON.stringify(deployment)}\n\n`);
 
-  // 2. Stream subsequent updates
+  // 2. Subscribe to real-time events for this deployment
   const onUpdate = (data) => {
     res.write(`data: ${JSON.stringify(data)}\n\n`);
-    if (data.step === 4 || data.step === -1) {
+    if (data.step === 4 || data.step === -1 || data.step === -99) {
       res.end();
     }
   };
@@ -80,6 +80,19 @@ function streamBuildProgress(req, res) {
   req.on('close', () => {
     eventBus.off(`update:${deployment.id}`, onUpdate);
   });
+}
+
+/**
+ * Stop running server and remove sandbox directory (Option 3)
+ * DELETE /sandbox/:id
+ */
+async function stopSandbox(req, res) {
+  const { id } = req.params;
+  const stopped = await stopAndRemoveDeployment(id, 'user-request');
+  if (!stopped) {
+    return res.status(404).json({ error: 'Sandbox not found or already stopped' });
+  }
+  res.json({ message: `Sandbox ${id} stopped and cleaned from disk`, status: 'stopped' });
 }
 
 /**
@@ -98,5 +111,6 @@ module.exports = {
   triggerBuild,
   getBuildStatus,
   streamBuildProgress,
+  stopSandbox,
   getHealth,
 };
