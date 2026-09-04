@@ -84,7 +84,9 @@ async function launchPreviewServer(targetDir, deployment, onExpire, emitUpdate) 
     cleanHost = '129.225.66.172';
   }
 
-  const liveUrl = `http://${cleanHost}:${port}`;
+  const liveUrl = cleanHost.includes('trycloudflare.com')
+    ? `https://${cleanHost}`
+    : `http://${cleanHost}:${port}`;
   deployment.url = liveUrl;
 
   // 6. OPTION 2: Auto-expire TTL timer

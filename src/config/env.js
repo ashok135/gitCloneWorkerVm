@@ -3,7 +3,7 @@ require('dotenv').config();
 
 module.exports = {
   PORT: process.env.PORT || 4000,
-  PUBLIC_HOST: process.env.PUBLIC_HOST || '129.225.66.172',
+  PUBLIC_HOST: process.env.PUBLIC_HOST || 'disks-edwards-awards-netscape.trycloudflare.com',
   SANDBOXES_DIR: path.resolve(__dirname, '../../sandboxes'),
   SANDBOX_TTL_MINUTES: parseInt(process.env.SANDBOX_TTL_MINUTES || '60', 10),
 };

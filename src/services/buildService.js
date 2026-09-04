@@ -333,7 +333,9 @@ async function executeBuildPipeline(deployment) {
         cleanHost = '129.225.66.172';
       }
 
-      const liveUrl = `http://${cleanHost}:${port}`;
+      const liveUrl = cleanHost.includes('trycloudflare.com')
+        ? `https://${cleanHost}`
+        : `http://${cleanHost}:${port}`;
       deployment.url = liveUrl;
       deployment.step = 4;
       deployment.status = 'live';
