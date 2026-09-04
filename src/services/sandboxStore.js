@@ -30,6 +30,8 @@ try {
           const isExpired = d.expiresAt && new Date(d.expiresAt).getTime() < now;
           // Only restore active, non-expired deployments with allocated port
           if (!isExpired && d.status === 'live' && d.port) {
+            // Ensure logs array exists (it's not persisted to disk)
+            if (!Array.isArray(d.logs)) d.logs = [];
             deployments.set(d.id, d);
           }
         }

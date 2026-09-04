@@ -26,7 +26,7 @@ async function launchPreviewServer(targetDir, deployment, onExpire, emitUpdate) 
   const nmPath = path.join(targetDir, 'node_modules');
   if (fs.existsSync(nmPath)) {
     fs.rm(nmPath, { recursive: true, force: true }, (rmErr) => {
-      if (!rmErr) {
+      if (!rmErr && Array.isArray(deployment.logs)) {
         deployment.logs.push('🧹 Option 1: Cleaned up node_modules to preserve VM disk space.');
         emitUpdate();
       }

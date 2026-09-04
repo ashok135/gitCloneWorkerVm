@@ -57,6 +57,7 @@ async function stopAndRemoveDeployment(id, reason = 'manual') {
     deployment.status = reason === 'auto-expired' ? 'expired' : 'stopped';
     deployment.step = -99;
     deployment.url = null;
+    if (!Array.isArray(deployment.logs)) deployment.logs = [];
     deployment.logs.push(`🛑 Sandbox terminated (${reason}) and disk cleaned.`);
     emitUpdate(id, deployment);
   }
