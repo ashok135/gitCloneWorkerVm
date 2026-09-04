@@ -3,12 +3,25 @@ const eventBus = require('../events/eventBus');
 
 /**
  * Runs a terminal command inside `cwd` and appends stdout/stderr to deployment logs.
- * Emits real-time progress events to the SSE stream.
+ * Accepts either:
+ * - onLog callback function: (logText) => void
+ * - deployment object: { id, logs: [] }
  */
-function runCommand(cmd, cwd, deployment) {
+function runCommand(cmd, cwd, deploymentOrOnLog) {
   return new Promise((resolve, reject) => {
-    deployment.logs.push(`$ ${cmd}`);
-    eventBus.emit(`update:${deployment.id}`, deployment);
+    const handleLog = (msg) => {
+      if (typeof deploymentOrOnLog === 'function') {
+        deploymentOrOnLog(msg);
+      } else if (deploymentOrOnLog) {
+        if (!Array.isArray(deploymentOrOnLog.logs)) {
+          deploymentOrOnLog.logs = [];
+        }
+        deploymentOrOnLog.logs.push(msg);
+        eventBus.emit(`update:${deploymentOrOnLog.id}`, deploymentOrOnLog);
+      }
+    };
+
+    handleLog(`$ ${cmd}`);
 
     // Limits Node memory to 512MB to safeguard 1GB RAM Oracle VMs
     const child = exec(cmd, {
@@ -24,16 +37,14 @@ function runCommand(cmd, cwd, deployment) {
     if (child.stdout) {
       child.stdout.on('data', (data) => {
         const lines = data.toString().split('\n').filter(Boolean);
-        deployment.logs.push(...lines);
-        eventBus.emit(`update:${deployment.id}`, deployment);
+        lines.forEach(handleLog);
       });
     }
 
     if (child.stderr) {
       child.stderr.on('data', (data) => {
         const lines = data.toString().split('\n').filter(Boolean);
-        deployment.logs.push(...lines);
-        eventBus.emit(`update:${deployment.id}`, deployment);
+        lines.forEach(handleLog);
       });
     }
 
@@ -42,15 +53,13 @@ function runCommand(cmd, cwd, deployment) {
         resolve();
       } else {
         const errMsg = `Command exited with code ${code}: ${cmd}`;
-        deployment.logs.push(errMsg);
-        eventBus.emit(`update:${deployment.id}`, deployment);
+        handleLog(errMsg);
         reject(new Error(errMsg));
       }
     });
 
     child.on('error', (err) => {
-      deployment.logs.push(`Execution error: ${err.message}`);
-      eventBus.emit(`update:${deployment.id}`, deployment);
+      handleLog(`Execution error: ${err.message}`);
       reject(err);
     });
   });

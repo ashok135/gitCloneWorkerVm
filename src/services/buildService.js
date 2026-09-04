@@ -65,6 +65,9 @@ async function stopAndRemoveDeployment(id, reason = 'manual') {
  * Execute the build & deploy pipeline
  */
 async function executeBuildPipeline(deployment) {
+  if (!Array.isArray(deployment.logs)) {
+    deployment.logs = [];
+  }
   const targetDir = path.join(SANDBOXES_DIR, deployment.id);
   const notify = () => emitUpdate(deployment.id, deployment);
 
@@ -170,6 +173,9 @@ async function executeBuildPipeline(deployment) {
     deployment.step = -failedStep;
     deployment.status = 'failed';
     deployment.error = err.message || 'Build failed';
+    if (!Array.isArray(deployment.logs)) {
+      deployment.logs = [];
+    }
     deployment.logs.push(`❌ Error: ${deployment.error}`);
     notify();
   }
