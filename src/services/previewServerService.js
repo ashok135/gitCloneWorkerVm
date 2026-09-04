@@ -4,6 +4,7 @@ const express = require('express');
 const { getNextAvailablePort } = require('./portService');
 const { registerServer, setTtlTimer } = require('./sandboxStore');
 const { PUBLIC_HOST, SANDBOX_TTL_MINUTES } = require('../config/env');
+const { startTunnel } = require('./tunnelService');
 
 const CANDIDATE_STATIC_FOLDERS = ['dist', 'build', 'out', 'public', '.'];
 
@@ -73,7 +74,12 @@ async function launchPreviewServer(targetDir, deployment, onExpire, emitUpdate) 
 
   registerServer(deployment.id, server);
 
-  // 5. Compute public URL
+  // 5. Compute public URL & provision dedicated Cloudflare quick-tunnel
+  deployment.logs.push('Provisioning dedicated Cloudflare HTTPS tunnel...');
+  emitUpdate();
+
+  const tunnelUrl = await startTunnel(deployment.id, port);
+
   const rawHost = (deployment.host || PUBLIC_HOST || '129.225.66.172').trim();
   let cleanHost = rawHost
     .replace(/^https?:\/\//i, '')
@@ -84,10 +90,11 @@ async function launchPreviewServer(targetDir, deployment, onExpire, emitUpdate) 
     cleanHost = '129.225.66.172';
   }
 
-  const liveUrl = cleanHost.includes('trycloudflare.com')
+  const liveUrl = tunnelUrl || (cleanHost.includes('trycloudflare.com')
     ? `https://${cleanHost}/?_port=${port}`
-    : `http://${cleanHost}:${port}`;
+    : `http://${cleanHost}:${port}`);
   deployment.url = liveUrl;
+  deployment.logs.push(`✓ Live deployment URL: ${liveUrl}`);
 
   // 6. OPTION 2: Auto-expire TTL timer
   const ttlMinutes = SANDBOX_TTL_MINUTES || 60;

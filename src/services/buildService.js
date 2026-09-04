@@ -20,6 +20,7 @@ const { setupEnvironment } = require('./envDetector');
 const { unpackFiles } = require('./unpackService');
 const { launchPreviewServer } = require('./previewServerService');
 const { getNextAvailablePort } = require('./portService');
+const { startTunnel, stopTunnel } = require('./tunnelService');
 
 // Ensure sandboxes directory exists
 if (!fs.existsSync(SANDBOXES_DIR)) {
@@ -45,7 +46,10 @@ async function stopAndRemoveDeployment(id, reason = 'manual') {
   // 3. Stop running backend child process immediately (if backend)
   closeProcess(id);
 
-  // 4. Remove deployment from registry immediately
+  // 4. Terminate dynamic Cloudflare tunnel immediately
+  stopTunnel(id);
+
+  // 5. Remove deployment from registry immediately
   deleteDeployment(id);
 
   // 5. Update deployment state & emit event
@@ -333,9 +337,15 @@ async function executeBuildPipeline(deployment) {
         cleanHost = '129.225.66.172';
       }
 
-      const liveUrl = cleanHost.includes('trycloudflare.com')
+      deployment.logs.push('Provisioning dedicated Cloudflare HTTPS tunnel...');
+      notify();
+
+      const tunnelUrl = await startTunnel(deployment.id, port);
+
+      const liveUrl = tunnelUrl || (cleanHost.includes('trycloudflare.com')
         ? `https://${cleanHost}/?_port=${port}`
-        : `http://${cleanHost}:${port}`;
+        : `http://${cleanHost}:${port}`);
+
       deployment.url = liveUrl;
       deployment.step = 4;
       deployment.status = 'live';
