@@ -44,6 +44,11 @@ async function launchPreviewServer(targetDir, deployment, onExpire, emitUpdate) 
   });
   previewApp.use(express.static(staticDir));
   previewApp.get('*', (req, res) => {
+    // If request looks like a static asset file (e.g. .css, .js, .png) not found by static middleware
+    if (/\.[a-zA-Z0-9]+$/.test(req.path) && !req.path.endsWith('.html')) {
+      return res.status(404).send('Not Found');
+    }
+
     const indexHtml = path.join(staticDir, 'index.html');
     if (fs.existsSync(indexHtml)) {
       res.sendFile(indexHtml);
