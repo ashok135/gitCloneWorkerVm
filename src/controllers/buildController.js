@@ -6,7 +6,7 @@ const eventBus = require('../events/eventBus');
  * POST /build
  */
 function triggerBuild(req, res) {
-  const { deploymentId, repositoryUrl, repoName } = req.body;
+  const { deploymentId, repositoryUrl, repoName, envVars } = req.body;
 
   if (!repositoryUrl) {
     return res.status(400).json({ error: 'repositoryUrl is required' });
@@ -26,7 +26,7 @@ function triggerBuild(req, res) {
     ? cleanPublicHost
     : (hostFromReq || 'localhost');
 
-  createDeployment(id, name, repositoryUrl, host);
+  createDeployment(id, name, repositoryUrl, host, envVars);
 
   res.status(202).json({
     message: 'Build accepted by worker',

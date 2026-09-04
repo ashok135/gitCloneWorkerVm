@@ -94,6 +94,67 @@ async function executeBuildPipeline(deployment) {
     eventBus.emit(`update:${deployment.id}`, deployment);
 
     // ----------------------------------------------------
+    // ENVIRONMENT SETUP & DETECTION (.env, .env.example)
+    // ----------------------------------------------------
+    const envCandidateFiles = ['.env.example', '.env.sample', '.env.template', '.env.local.example'];
+    let detectedEnvFile = null;
+    for (const envFile of envCandidateFiles) {
+      const fullEnvPath = path.join(targetDir, envFile);
+      if (fs.existsSync(fullEnvPath)) {
+        detectedEnvFile = fullEnvPath;
+        break;
+      }
+    }
+
+    if (detectedEnvFile) {
+      try {
+        const envContent = fs.readFileSync(detectedEnvFile, 'utf8');
+        const envLines = envContent
+          .split('\n')
+          .map((l) => l.trim())
+          .filter((l) => l && !l.startsWith('#') && l.includes('='));
+        const detectedKeys = envLines.map((l) => l.split('=')[0].trim());
+        deployment.detectedEnv = {
+          file: path.basename(detectedEnvFile),
+          keys: detectedKeys,
+          template: envContent,
+        };
+        deployment.logs.push(
+          `ℹ Environment setup: detected ${path.basename(detectedEnvFile)} with ${detectedKeys.length} variable(s): [${detectedKeys.join(', ')}]`
+        );
+        eventBus.emit(`update:${deployment.id}`, deployment);
+      } catch (e) {}
+    }
+
+    // Write custom env variables if provided by user
+    if (deployment.envVars) {
+      try {
+        let envContent = '';
+        if (typeof deployment.envVars === 'string') {
+          envContent = deployment.envVars;
+        } else if (typeof deployment.envVars === 'object') {
+          envContent = Object.entries(deployment.envVars)
+            .map(([k, v]) => `${k}=${v}`)
+            .join('\n');
+        }
+        if (envContent.trim()) {
+          fs.writeFileSync(path.join(targetDir, '.env'), envContent, 'utf8');
+          deployment.logs.push('✓ Applied user-configured environment variables (.env).');
+          eventBus.emit(`update:${deployment.id}`, deployment);
+        }
+      } catch (e) {
+        deployment.logs.push(`⚠ Could not write .env: ${e.message}`);
+      }
+    } else if (detectedEnvFile && !fs.existsSync(path.join(targetDir, '.env'))) {
+      // Safe fallback: copy .env.example -> .env so builds expecting variables don't crash
+      try {
+        fs.copyFileSync(detectedEnvFile, path.join(targetDir, '.env'));
+        deployment.logs.push(`✓ Auto-initialized .env from ${path.basename(detectedEnvFile)} defaults.`);
+        eventBus.emit(`update:${deployment.id}`, deployment);
+      } catch (e) {}
+    }
+
+    // ----------------------------------------------------
     // STEP 2: INSTALLING DEPENDENCIES
     // ----------------------------------------------------
     deployment.step = 2;
@@ -246,12 +307,13 @@ async function executeBuildPipeline(deployment) {
 /**
  * Register a new build job and start pipeline
  */
-function createDeployment(id, repoName, repoUrl, host) {
+function createDeployment(id, repoName, repoUrl, host, envVars) {
   const deployment = {
     id,
     repoName,
     repoUrl,
     host,
+    envVars,
     step: 1,
     status: 'cloning',
     logs: [`[${new Date().toLocaleTimeString()}] Worker accepted build for ${repoName}`],
