@@ -23,70 +23,37 @@ try {
     const raw = fs.readFileSync(REGISTRY_FILE, 'utf8');
     const parsed = JSON.parse(raw);
     if (Array.isArray(parsed)) {
+      const now = Date.now();
       parsed.forEach((d) => {
         if (d && d.id) {
-          deployments.set(d.id, d);
+          const isExpired = d.expiresAt && new Date(d.expiresAt).getTime() < now;
+          // Only restore active, non-expired deployments with allocated port
+          if (!isExpired && d.status === 'live' && d.port) {
+            deployments.set(d.id, d);
+          }
         }
       });
-      console.log(`✓ Restored ${deployments.size} deployment(s) from disk registry.`);
+      console.log(`✓ Restored ${deployments.size} active deployment(s) from disk registry.`);
     }
   }
 } catch (e) {
   console.warn('Could not load deployments registry:', e.message);
 }
 
-function inferRepoNameFromDisk(targetDir, fallbackId) {
-  try {
-    const pkgPath = path.join(targetDir, 'package.json');
-    if (fs.existsSync(pkgPath)) {
-      const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf8'));
-      if (pkg.name && typeof pkg.name === 'string' && pkg.name.trim()) {
-        return pkg.name.trim();
-      }
-    }
-
-    const gitConfigPath = path.join(targetDir, '.git', 'config');
-    if (fs.existsSync(gitConfigPath)) {
-      const gitConfig = fs.readFileSync(gitConfigPath, 'utf8');
-      const match = gitConfig.match(/url\s*=\s*.*\/([^\/\s]+?)(\.git)?$/m);
-      if (match && match[1]) {
-        return match[1].replace(/\.git$/i, '');
-      }
-    }
-
-    const files = fs.readdirSync(targetDir);
-    const htmlFile = files.find((f) => f.toLowerCase().endsWith('.html'));
-    if (htmlFile) {
-      if (htmlFile.toLowerCase() !== 'index.html') {
-        return htmlFile.replace(/\.[^/.]+$/, '');
-      }
-      const htmlContent = fs.readFileSync(path.join(targetDir, htmlFile), 'utf8');
-      const titleMatch = htmlContent.match(/<title[^>]*>([^<]+)<\/title>/i);
-      if (titleMatch && titleMatch[1]?.trim()) {
-        return titleMatch[1].trim();
-      }
-    }
-  } catch (e) {}
-
-  const shortSuffix = fallbackId.replace(/^dep_/, '').slice(-4);
-  return `Project-${shortSuffix || 'sandbox'}`;
-}
-
-// 3. Scan for existing sandbox directories on disk
+// 3. Clean up orphaned or dead directories from previous crashes/restarts
 try {
   const entries = fs.readdirSync(SANDBOXES_DIR);
   for (const entry of entries) {
-    if (entry.startsWith('dep_') && !deployments.has(entry)) {
+    if (entry.startsWith('dep_')) {
       const full = path.join(SANDBOXES_DIR, entry);
-      if (fs.statSync(full).isDirectory()) {
-        const repoName = inferRepoNameFromDisk(full, entry);
-        deployments.set(entry, {
-          id: entry,
-          repoName,
-          status: 'live',
-          step: 4,
-          createdAt: fs.statSync(full).birthtime?.toISOString() || new Date().toISOString(),
-        });
+      // If folder is not currently a valid restored deployment, remove it to save disk space
+      if (!deployments.has(entry) && fs.statSync(full).isDirectory()) {
+        try {
+          fs.rmSync(full, { recursive: true, force: true });
+          console.log(`🧹 Cleaned up stale orphaned sandbox directory: ${entry}`);
+        } catch (rmErr) {
+          console.warn(`Could not delete stale directory ${entry}:`, rmErr.message);
+        }
       }
     }
   }
@@ -125,7 +92,14 @@ function getDeployment(id) {
 }
 
 function getAllDeployments() {
+  const now = Date.now();
   return Array.from(deployments.values())
+    .filter((d) => {
+      if (!d || !d.id) return false;
+      if (d.expiresAt && new Date(d.expiresAt).getTime() < now) return false;
+      if (d.status === 'live' && !d.port && !d.url) return false;
+      return d.status !== 'stopped' && d.status !== 'expired';
+    })
     .map((d) => ({
       id: d.id,
       repoName: d.repoName,
