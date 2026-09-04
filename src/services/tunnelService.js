@@ -1,6 +1,6 @@
 const { spawn } = require('child_process');
 
-// Map of deploymentId -> ChildProcess
+// Map of deploymentId -> { proc, url }
 const activeTunnels = new Map();
 
 /**
@@ -18,31 +18,44 @@ function startTunnel(deploymentId, port) {
 
       const proc = spawn(
         'cloudflared',
-        ['tunnel', '--url', `http://127.0.0.1:${port}`, '--metrics', 'localhost:0'],
+        [
+          'tunnel',
+          '--url', `http://127.0.0.1:${port}`,
+          '--metrics', '127.0.0.1:0',
+          '--no-autoupdate',
+        ],
         {
           stdio: ['ignore', 'pipe', 'pipe'],
+          detached: false,
         }
       );
 
-      activeTunnels.set(deploymentId, proc);
+      activeTunnels.set(deploymentId, { proc, url: null });
 
       let resolved = false;
+      let stderrBuffer = '';
+
       const timeout = setTimeout(() => {
         if (!resolved) {
           resolved = true;
-          console.warn(`⚠️ Cloudflare tunnel startup timed out for ${deploymentId} after 15s`);
+          console.warn(`⚠️ Cloudflare tunnel startup timed out for ${deploymentId} after 20s`);
+          console.warn(`⚠️ cloudflared stderr so far:\n${stderrBuffer}`);
           resolve(null);
         }
-      }, 15000);
+      }, 20000);
 
       const inspectOutput = (chunk) => {
         const text = chunk.toString();
+        stderrBuffer += text;
         // Match Cloudflare generated hostname: https://<random>.trycloudflare.com
         const match = text.match(/https:\/\/[a-zA-Z0-9.-]+\.trycloudflare\.com/);
         if (match && !resolved) {
           resolved = true;
           clearTimeout(timeout);
           const tunnelUrl = match[0];
+          // Update the stored tunnel info with the URL
+          const entry = activeTunnels.get(deploymentId);
+          if (entry) entry.url = tunnelUrl;
           console.log(`✓ Dedicated tunnel provisioned for ${deploymentId}: ${tunnelUrl}`);
           resolve(tunnelUrl);
         }
@@ -52,7 +65,7 @@ function startTunnel(deploymentId, port) {
       if (proc.stderr) proc.stderr.on('data', inspectOutput);
 
       proc.on('error', (err) => {
-        console.warn(`Could not spawn cloudflared for ${deploymentId}:`, err.message);
+        console.error(`❌ cloudflared spawn error for ${deploymentId}: ${err.message}`);
         if (!resolved) {
           resolved = true;
           clearTimeout(timeout);
@@ -60,7 +73,11 @@ function startTunnel(deploymentId, port) {
         }
       });
 
-      proc.on('close', (code) => {
+      proc.on('close', (code, signal) => {
+        console.warn(`⚠️ cloudflared process for ${deploymentId} exited with code=${code} signal=${signal}`);
+        if (stderrBuffer && !resolved) {
+          console.warn(`⚠️ cloudflared last output:\n${stderrBuffer.slice(-500)}`);
+        }
         activeTunnels.delete(deploymentId);
         if (!resolved) {
           resolved = true;
@@ -69,7 +86,7 @@ function startTunnel(deploymentId, port) {
         }
       });
     } catch (err) {
-      console.warn(`Failed to create tunnel for ${deploymentId}:`, err.message);
+      console.error(`Failed to create tunnel for ${deploymentId}:`, err.message);
       resolve(null);
     }
   });
@@ -80,7 +97,8 @@ function startTunnel(deploymentId, port) {
  */
 function stopTunnel(deploymentId) {
   if (activeTunnels.has(deploymentId)) {
-    const proc = activeTunnels.get(deploymentId);
+    const entry = activeTunnels.get(deploymentId);
+    const proc = entry ? entry.proc : null;
     try {
       console.log(`🛑 Terminating Cloudflare tunnel for deployment ${deploymentId}...`);
       if (proc && !proc.killed) {
@@ -111,6 +129,14 @@ function stopAllTunnels() {
   }
 }
 
+/**
+ * Check if a tunnel is still alive for a deployment
+ */
+function isTunnelAlive(deploymentId) {
+  const entry = activeTunnels.get(deploymentId);
+  return entry && entry.proc && !entry.proc.killed;
+}
+
 process.on('exit', stopAllTunnels);
 process.on('SIGINT', () => {
   stopAllTunnels();
@@ -125,4 +151,5 @@ module.exports = {
   startTunnel,
   stopTunnel,
   stopAllTunnels,
+  isTunnelAlive,
 };
