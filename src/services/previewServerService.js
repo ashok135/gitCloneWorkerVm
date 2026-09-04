@@ -40,6 +40,9 @@ async function launchPreviewServer(targetDir, deployment, onExpire, emitUpdate) 
   const previewApp = express();
   previewApp.use((req, res, next) => {
     res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+    res.removeHeader('X-Frame-Options');
+    res.setHeader('Content-Security-Policy', "frame-ancestors *");
     next();
   });
   previewApp.use(express.static(staticDir));
