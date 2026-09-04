@@ -80,15 +80,7 @@ function resolveTarget(req) {
     }
   }
 
-  // 5. Fallback: Target the latest active live sandbox
-  const liveDeployments = getAllDeployments().filter((d) => d.status === 'live' && d.port);
-  if (liveDeployments.length > 0) {
-    return {
-      port: liveDeployments[0].port,
-      url: req.url,
-    };
-  }
-
+  // No explicit routing found — let the request fall through to the worker API
   return null;
 }
 
