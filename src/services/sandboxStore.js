@@ -1,12 +1,84 @@
+const fs = require('fs');
+const path = require('path');
+const { SANDBOXES_DIR } = require('../config/env');
+
+const REGISTRY_FILE = path.join(SANDBOXES_DIR, 'deployments_registry.json');
+
 /**
  * In-memory store for active deployments, running preview servers, and TTL timers
+ * with persistent JSON disk backup
  */
 const deployments = new Map();
 const runningServers = new Map();
 const sandboxTimers = new Map();
 
+// 1. Ensure sandboxes directory exists
+if (!fs.existsSync(SANDBOXES_DIR)) {
+  fs.mkdirSync(SANDBOXES_DIR, { recursive: true });
+}
+
+// 2. Load persisted deployments from disk on startup
+try {
+  if (fs.existsSync(REGISTRY_FILE)) {
+    const raw = fs.readFileSync(REGISTRY_FILE, 'utf8');
+    const parsed = JSON.parse(raw);
+    if (Array.isArray(parsed)) {
+      parsed.forEach((d) => {
+        if (d && d.id) {
+          deployments.set(d.id, d);
+        }
+      });
+      console.log(`✓ Restored ${deployments.size} deployment(s) from disk registry.`);
+    }
+  }
+} catch (e) {
+  console.warn('Could not load deployments registry:', e.message);
+}
+
+// 3. Scan for existing sandbox directories on disk
+try {
+  const entries = fs.readdirSync(SANDBOXES_DIR);
+  for (const entry of entries) {
+    if (entry.startsWith('dep_') && !deployments.has(entry)) {
+      const full = path.join(SANDBOXES_DIR, entry);
+      if (fs.statSync(full).isDirectory()) {
+        deployments.set(entry, {
+          id: entry,
+          repoName: entry,
+          status: 'live',
+          step: 4,
+          createdAt: fs.statSync(full).birthtime?.toISOString() || new Date().toISOString(),
+        });
+      }
+    }
+  }
+} catch (e) {}
+
+function persistToDisk() {
+  try {
+    const data = Array.from(deployments.values()).map((d) => ({
+      id: d.id,
+      repoName: d.repoName,
+      repoUrl: d.repoUrl,
+      isUpload: Boolean(d.isUpload),
+      status: d.status,
+      step: d.step,
+      port: d.port,
+      url: d.url,
+      createdAt: d.createdAt,
+      expiresAt: d.expiresAt,
+      ttlMinutes: d.ttlMinutes,
+      detectedEnv: d.detectedEnv,
+    }));
+    fs.writeFileSync(REGISTRY_FILE, JSON.stringify(data, null, 2), 'utf8');
+  } catch (e) {
+    console.error('Failed to write deployments registry:', e.message);
+  }
+}
+
 function saveDeployment(id, data) {
   deployments.set(id, data);
+  persistToDisk();
   return data;
 }
 
@@ -34,7 +106,9 @@ function getAllDeployments() {
 }
 
 function deleteDeployment(id) {
-  return deployments.delete(id);
+  const res = deployments.delete(id);
+  persistToDisk();
+  return res;
 }
 
 function registerServer(id, server) {
