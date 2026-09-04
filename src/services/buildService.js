@@ -1,7 +1,8 @@
 const path = require('path');
 const fs = require('fs');
+const { spawn } = require('child_process');
 const { runCommand } = require('./commandRunner');
-const { SANDBOXES_DIR } = require('../config/env');
+const { SANDBOXES_DIR, PUBLIC_HOST, SANDBOX_TTL_MINUTES } = require('../config/env');
 const eventBus = require('../events/eventBus');
 const {
   saveDeployment,
@@ -9,12 +10,16 @@ const {
   getAllDeployments,
   deleteDeployment,
   closeServer,
+  closeProcess,
+  registerProcess,
+  setTtlTimer,
   clearTtlTimer,
   getRunningCount,
 } = require('./sandboxStore');
 const { setupEnvironment } = require('./envDetector');
 const { unpackFiles } = require('./unpackService');
 const { launchPreviewServer } = require('./previewServerService');
+const { getNextAvailablePort } = require('./portService');
 
 // Ensure sandboxes directory exists
 if (!fs.existsSync(SANDBOXES_DIR)) {
@@ -26,7 +31,7 @@ function emitUpdate(id, deployment) {
 }
 
 /**
- * Stop running server and remove sandbox directory from disk (Option 3 & Option 2)
+ * Stop running server/process and remove sandbox directory from disk (Option 3 & Option 2)
  */
 async function stopAndRemoveDeployment(id, reason = 'manual') {
   const deployment = getDeployment(id);
@@ -34,13 +39,16 @@ async function stopAndRemoveDeployment(id, reason = 'manual') {
   // 1. Clear TTL timer
   clearTtlTimer(id);
 
-  // 2. Stop running Express preview server immediately
+  // 2. Stop running Express preview server immediately (if frontend)
   closeServer(id);
 
-  // 3. Remove deployment from registry immediately
+  // 3. Stop running backend child process immediately (if backend)
+  closeProcess(id);
+
+  // 4. Remove deployment from registry immediately
   deleteDeployment(id);
 
-  // 4. Update deployment state & emit event
+  // 5. Update deployment state & emit event
   if (deployment) {
     deployment.status = reason === 'auto-expired' ? 'expired' : 'stopped';
     deployment.step = -99;
@@ -49,7 +57,7 @@ async function stopAndRemoveDeployment(id, reason = 'manual') {
     emitUpdate(id, deployment);
   }
 
-  // 5. Delete the sandbox directory from VM disk asynchronously in background (no HTTP lag)
+  // 6. Delete the sandbox directory from VM disk asynchronously in background (no HTTP lag)
   const targetDir = path.join(SANDBOXES_DIR, id);
   if (fs.existsSync(targetDir)) {
     fs.promises
@@ -106,9 +114,58 @@ async function executeBuildPipeline(deployment) {
     }
 
     // ----------------------------------------------------
+    // RESOLVE WORKING DIRECTORY (MONOREPO / ROOT DIR)
+    // ----------------------------------------------------
+    let workingDir = targetDir;
+    if (deployment.rootDir && typeof deployment.rootDir === 'string') {
+      const cleanRootDir = deployment.rootDir.trim().replace(/^\.?\/+/, '');
+      if (cleanRootDir) {
+        const candidateWorkingDir = path.join(targetDir, cleanRootDir);
+        if (fs.existsSync(candidateWorkingDir) && fs.statSync(candidateWorkingDir).isDirectory()) {
+          workingDir = candidateWorkingDir;
+          deployment.logs.push(`📁 Configured Root Directory: /${cleanRootDir}`);
+          notify();
+        } else {
+          deployment.logs.push(
+            `⚠️ Specified Root Directory '/${cleanRootDir}' not found, falling back to repository root.`
+          );
+          notify();
+        }
+      }
+    } else {
+      // Smart Auto-detection: if root has no package.json and no HTML files, check for common monorepo subfolders
+      const rootPkg = path.join(targetDir, 'package.json');
+      let hasHtml = false;
+      try {
+        hasHtml = fs.readdirSync(targetDir).some((f) => f.toLowerCase().endsWith('.html'));
+      } catch {}
+
+      if (!fs.existsSync(rootPkg) && !hasHtml) {
+        const candidates = ['frontend', 'client', 'web', 'ui', 'app', 'backend', 'server', 'api'];
+        for (const cand of candidates) {
+          const candPath = path.join(targetDir, cand);
+          if (fs.existsSync(candPath) && fs.statSync(candPath).isDirectory()) {
+            const candPkg = path.join(candPath, 'package.json');
+            let candHasHtml = false;
+            try {
+              candHasHtml = fs.readdirSync(candPath).some((f) => f.toLowerCase().endsWith('.html'));
+            } catch {}
+            if (fs.existsSync(candPkg) || candHasHtml) {
+              workingDir = candPath;
+              deployment.rootDir = cand;
+              deployment.logs.push(`🔍 Auto-detected monorepo project subfolder: /${cand}`);
+              notify();
+              break;
+            }
+          }
+        }
+      }
+    }
+
+    // ----------------------------------------------------
     // ENVIRONMENT SETUP & DETECTION (.env, .env.example)
     // ----------------------------------------------------
-    setupEnvironment(targetDir, deployment, notify);
+    setupEnvironment(workingDir, deployment, notify);
 
     // ----------------------------------------------------
     // STEP 2: INSTALLING DEPENDENCIES
@@ -118,56 +175,189 @@ async function executeBuildPipeline(deployment) {
     deployment.logs.push('Running npm install (memory-optimized)...');
     notify();
 
-    const packageJsonPath = path.join(targetDir, 'package.json');
+    let pkg = null;
+    const packageJsonPath = path.join(workingDir, 'package.json');
     if (fs.existsSync(packageJsonPath)) {
       await runCommand(
         'npm install --prefer-offline --no-audit --no-fund',
-        targetDir,
+        workingDir,
         (log) => {
           deployment.logs.push(log);
           notify();
         }
       );
       deployment.logs.push('✓ Dependencies installed.');
+      try {
+        pkg = JSON.parse(fs.readFileSync(packageJsonPath, 'utf8'));
+      } catch {}
     } else {
       deployment.logs.push('ℹ No package.json found, skipping npm install.');
     }
     notify();
 
     // ----------------------------------------------------
-    // STEP 3: COMPILING BUNDLE
+    // DETERMINE PROJECT TYPE (BACKEND vs FRONTEND)
     // ----------------------------------------------------
-    let hasBuildScript = false;
-    if (fs.existsSync(packageJsonPath)) {
-      try {
-        const pkg = JSON.parse(fs.readFileSync(packageJsonPath, 'utf8'));
-        hasBuildScript = Boolean(pkg.scripts && pkg.scripts.build);
-      } catch (e) {}
-    }
+    const hasBuildScript = Boolean(pkg?.scripts && pkg?.scripts?.build);
+    const hasStartScript = Boolean(pkg?.scripts && pkg?.scripts?.start);
+    const isExplicitBackend = deployment.projectType === 'backend';
+    const isExplicitFrontend = deployment.projectType === 'frontend';
 
-    if (hasBuildScript) {
+    const deps = { ...(pkg?.dependencies || {}), ...(pkg?.devDependencies || {}) };
+    const hasBackendDeps = Boolean(
+      deps.express || deps.fastify || deps.koa || deps['@nestjs/core'] || deps.cors
+    );
+    const hasBackendEntry =
+      fs.existsSync(path.join(workingDir, 'server.js')) ||
+      fs.existsSync(path.join(workingDir, 'app.js')) ||
+      (fs.existsSync(path.join(workingDir, 'index.js')) && !hasBuildScript);
+
+    const isBackend =
+      isExplicitBackend ||
+      (!isExplicitFrontend && !hasBuildScript && (hasBackendDeps || hasBackendEntry));
+
+    deployment.isBackend = isBackend;
+
+    if (isBackend) {
+      // --------------------------------------------------
+      // LAUNCH NODE.JS BACKEND PROCESS
+      // --------------------------------------------------
       deployment.step = 3;
-      deployment.status = 'building';
-      deployment.logs.push('Running build script: npm run build...');
+      deployment.status = 'starting';
+      deployment.logs.push('🚀 Starting Node.js backend server process...');
       notify();
 
-      await runCommand('npm run build', targetDir, (log) => {
-        deployment.logs.push(log);
+      const port = await getNextAvailablePort(4001);
+      deployment.port = port;
+
+      let startCmd = 'npm';
+      let startArgs = ['start'];
+      if (!hasStartScript) {
+        const entry =
+          [
+            'server.js',
+            'index.js',
+            'app.js',
+            'src/server.js',
+            'src/index.js',
+            'src/app.js',
+          ].find((f) => fs.existsSync(path.join(workingDir, f))) || 'index.js';
+        startCmd = 'node';
+        startArgs = [entry];
+      }
+
+      const env = {
+        ...process.env,
+        PORT: String(port),
+        HOST: '0.0.0.0',
+        NODE_ENV: 'production',
+        ...(deployment.envVars && typeof deployment.envVars === 'object'
+          ? deployment.envVars
+          : {}),
+      };
+
+      deployment.logs.push(`Executing: ${startCmd} ${startArgs.join(' ')} (PORT=${port})`);
+      notify();
+
+      const child = spawn(startCmd, startArgs, {
+        cwd: workingDir,
+        env,
+        shell: true,
+      });
+
+      registerProcess(deployment.id, child);
+
+      child.stdout.on('data', (chunk) => {
+        const text = chunk.toString().trim();
+        if (text) {
+          deployment.logs.push(text);
+          notify();
+        }
+      });
+
+      child.stderr.on('data', (chunk) => {
+        const text = chunk.toString().trim();
+        if (text) {
+          deployment.logs.push(`[backend] ${text}`);
+          notify();
+        }
+      });
+
+      child.on('error', (err) => {
+        deployment.logs.push(`❌ Backend process error: ${err.message}`);
         notify();
       });
-      deployment.logs.push('✓ Build script completed successfully.');
+
+      child.on('exit', (code) => {
+        if (deployment.status === 'live') {
+          deployment.logs.push(`⚠️ Backend process exited with code ${code}`);
+          notify();
+        }
+      });
+
+      // Compute Public URL
+      const rawHost = (deployment.host || PUBLIC_HOST || '129.225.66.172').trim();
+      let cleanHost =
+        rawHost
+          .replace(/^https?:\/\//i, '')
+          .replace(/\/+$/, '')
+          .split(':')[0] || '129.225.66.172';
+
+      if (
+        cleanHost === 'localhost' ||
+        cleanHost === '127.0.0.1' ||
+        cleanHost.includes('vercel.app')
+      ) {
+        cleanHost = '129.225.66.172';
+      }
+
+      const liveUrl = `http://${cleanHost}:${port}`;
+      deployment.url = liveUrl;
+      deployment.step = 4;
+      deployment.status = 'live';
+      deployment.logs.push(`✓ Backend API listening on port ${port} (${liveUrl})`);
+
+      // Set TTL Timer
+      const ttlMinutes = SANDBOX_TTL_MINUTES || 60;
+      const expiresAt = new Date(Date.now() + ttlMinutes * 60 * 1000).toISOString();
+      deployment.expiresAt = expiresAt;
+      deployment.ttlMinutes = ttlMinutes;
+
+      const timer = setTimeout(async () => {
+        console.log(`⏳ Auto-expiring backend sandbox ${deployment.id} after ${ttlMinutes}m`);
+        await stopAndRemoveDeployment(deployment.id, 'auto-expired');
+      }, ttlMinutes * 60 * 1000);
+
+      setTtlTimer(deployment.id, timer);
       notify();
+    } else {
+      // --------------------------------------------------
+      // STEP 3: COMPILING FRONTEND BUNDLE
+      // --------------------------------------------------
+      if (hasBuildScript) {
+        deployment.step = 3;
+        deployment.status = 'building';
+        deployment.logs.push('Running build script: npm run build...');
+        notify();
+
+        await runCommand('npm run build', workingDir, (log) => {
+          deployment.logs.push(log);
+          notify();
+        });
+        deployment.logs.push('✓ Build script completed successfully.');
+        notify();
+      }
+
+      // --------------------------------------------------
+      // STEP 4: LAUNCH STATIC PREVIEW SERVER
+      // --------------------------------------------------
+      deployment.step = 3;
+      deployment.status = 'starting';
+      deployment.logs.push('Spawning sandbox preview server...');
+      notify();
+
+      await launchPreviewServer(workingDir, deployment, stopAndRemoveDeployment, notify);
     }
-
-    // ----------------------------------------------------
-    // STEP 4: LAUNCH PREVIEW SERVER & SCHEDULE TTL (OPTION 2)
-    // ----------------------------------------------------
-    deployment.step = 3;
-    deployment.status = 'starting';
-    deployment.logs.push('Spawning sandbox preview server...');
-    notify();
-
-    await launchPreviewServer(targetDir, deployment, stopAndRemoveDeployment, notify);
   } catch (err) {
     const failedStep = deployment.step || 1;
     deployment.step = -failedStep;
@@ -181,13 +371,15 @@ async function executeBuildPipeline(deployment) {
   }
 }
 
-function createDeployment(id, repoName, repoUrl, host, envVars) {
+function createDeployment(id, repoName, repoUrl, host, envVars, rootDir, projectType) {
   const deployment = {
     id,
     repoName,
     repoUrl,
     host,
     envVars,
+    rootDir: rootDir || '',
+    projectType: projectType || 'auto',
     step: 1,
     status: 'cloning',
     logs: [`[${new Date().toLocaleTimeString()}] Worker accepted build for ${repoName}`],

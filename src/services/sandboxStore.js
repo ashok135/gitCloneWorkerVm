@@ -10,6 +10,7 @@ const REGISTRY_FILE = path.join(SANDBOXES_DIR, 'deployments_registry.json');
  */
 const deployments = new Map();
 const runningServers = new Map();
+const runningProcesses = new Map();
 const sandboxTimers = new Map();
 
 // 1. Ensure sandboxes directory exists
@@ -70,6 +71,9 @@ function persistToDisk() {
       step: d.step,
       port: d.port,
       url: d.url,
+      rootDir: d.rootDir || '',
+      isBackend: Boolean(d.isBackend),
+      projectType: d.projectType || 'auto',
       createdAt: d.createdAt,
       expiresAt: d.expiresAt,
       ttlMinutes: d.ttlMinutes,
@@ -109,6 +113,9 @@ function getAllDeployments() {
       step: d.step,
       port: d.port,
       url: d.url,
+      rootDir: d.rootDir || '',
+      isBackend: Boolean(d.isBackend),
+      projectType: d.projectType || 'auto',
       createdAt: d.createdAt,
       expiresAt: d.expiresAt,
       ttlMinutes: d.ttlMinutes,
@@ -145,6 +152,35 @@ function closeServer(id) {
   return false;
 }
 
+function registerProcess(id, proc) {
+  runningProcesses.set(id, proc);
+}
+
+function getProcess(id) {
+  return runningProcesses.get(id);
+}
+
+function closeProcess(id) {
+  if (runningProcesses.has(id)) {
+    const proc = runningProcesses.get(id);
+    try {
+      if (proc && !proc.killed) {
+        proc.kill('SIGTERM');
+        setTimeout(() => {
+          try {
+            if (proc && !proc.killed) proc.kill('SIGKILL');
+          } catch {}
+        }, 1200);
+      }
+    } catch (e) {
+      console.error(`Error closing child process for ${id}:`, e);
+    }
+    runningProcesses.delete(id);
+    return true;
+  }
+  return false;
+}
+
 function setTtlTimer(id, timer) {
   clearTtlTimer(id);
   sandboxTimers.set(id, timer);
@@ -160,7 +196,7 @@ function clearTtlTimer(id) {
 }
 
 function getRunningCount() {
-  return runningServers.size;
+  return runningServers.size + runningProcesses.size;
 }
 
 module.exports = {
@@ -171,6 +207,9 @@ module.exports = {
   registerServer,
   getServer,
   closeServer,
+  registerProcess,
+  getProcess,
+  closeProcess,
   setTtlTimer,
   clearTtlTimer,
   getRunningCount,

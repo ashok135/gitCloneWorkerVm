@@ -34,7 +34,7 @@ function resolveHost(req) {
  * POST /build
  */
 function triggerBuild(req, res) {
-  const { deploymentId, repositoryUrl, repoName, envVars } = req.body;
+  const { deploymentId, repositoryUrl, repoName, envVars, rootDir, projectType } = req.body;
 
   if (!repositoryUrl) {
     return res.status(400).json({ error: 'repositoryUrl is required' });
@@ -44,7 +44,7 @@ function triggerBuild(req, res) {
   const name = repoName || 'my-project';
   const host = resolveHost(req);
 
-  createDeployment(id, name, repositoryUrl, host, envVars);
+  createDeployment(id, name, repositoryUrl, host, envVars, rootDir, projectType);
 
   res.status(202).json({
     message: 'Build accepted by worker',
