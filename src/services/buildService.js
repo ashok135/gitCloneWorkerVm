@@ -229,7 +229,31 @@ async function executeBuildPipeline(deployment) {
         deps.hapi ||
         deps.mongoose ||
         deps.pg ||
-        deps.mysql2
+        deps.mysql2 ||
+        deps.prisma ||
+        deps['@prisma/client'] ||
+        deps.typeorm ||
+        deps.sequelize ||
+        deps.sqlite3 ||
+        deps.cors
+    );
+
+    const hasServerEntry = Boolean(
+      [
+        pkg?.main,
+        'server.js',
+        'server.ts',
+        'app.js',
+        'app.ts',
+        'index.js',
+        'index.ts',
+        'src/server.js',
+        'src/server.ts',
+        'src/index.js',
+        'src/index.ts',
+        'src/app.js',
+        'src/app.ts',
+      ].some((f) => f && fs.existsSync(path.join(workingDir, f)))
     );
 
     // If an HTML file exists, it's a frontend web app, unless user explicitly selected 'backend'
@@ -237,12 +261,26 @@ async function executeBuildPipeline(deployment) {
       isExplicitBackend ||
       (!isExplicitFrontend &&
         !hasHtml &&
-        !hasBuildScript &&
-        (hasBackendDeps || (fs.existsSync(path.join(workingDir, 'server.js')) && !hasHtml)));
+        (hasBackendDeps || (hasServerEntry && !hasHtml)));
 
     deployment.isBackend = isBackend;
 
     if (isBackend) {
+      // If the backend has a build script (TypeScript, NestJS, Prisma generate), compile it first!
+      if (hasBuildScript) {
+        deployment.step = 2;
+        deployment.status = 'building';
+        deployment.logs.push('Compiling backend (npm run build)...');
+        notify();
+
+        await runCommand('npm run build', workingDir, (log) => {
+          deployment.logs.push(log);
+          notify();
+        });
+        deployment.logs.push('✓ Backend compiled successfully.');
+        notify();
+      }
+
       // --------------------------------------------------
       // LAUNCH NODE.JS BACKEND PROCESS
       // --------------------------------------------------
@@ -259,15 +297,30 @@ async function executeBuildPipeline(deployment) {
       if (!hasStartScript) {
         const entry =
           [
+            pkg?.main,
+            'dist/index.js',
+            'dist/server.js',
+            'dist/app.js',
+            'build/index.js',
+            'build/server.js',
             'server.js',
             'index.js',
             'app.js',
             'src/server.js',
             'src/index.js',
             'src/app.js',
-          ].find((f) => fs.existsSync(path.join(workingDir, f))) || 'index.js';
-        startCmd = 'node';
-        startArgs = [entry];
+            'src/server.ts',
+            'src/index.ts',
+            'src/app.ts',
+          ].find((f) => f && fs.existsSync(path.join(workingDir, f))) || 'index.js';
+
+        if (entry.endsWith('.ts')) {
+          startCmd = 'npx';
+          startArgs = ['tsx', entry];
+        } else {
+          startCmd = 'node';
+          startArgs = [entry];
+        }
       }
 
       const env = {
