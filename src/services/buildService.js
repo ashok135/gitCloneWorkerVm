@@ -338,14 +338,20 @@ async function executeBuildPipeline(deployment) {
         cleanHost = '129.225.66.172';
       }
 
-      deployment.logs.push('Provisioning dedicated Cloudflare HTTPS tunnel...');
-      notify();
+      const directUrl = `http://${cleanHost}:${port}`;
+      deployment.directUrl = directUrl;
 
-      const tunnelUrl = await startTunnel(deployment.id, port);
-
-      const liveUrl = tunnelUrl || (cleanHost.includes('trycloudflare.com')
-        ? `https://${cleanHost}/?_port=${port}`
-        : `http://${cleanHost}:${port}`);
+      let liveUrl = directUrl;
+      if (process.env.ENABLE_CLOUDFLARE_TUNNEL === 'true') {
+        deployment.logs.push('Provisioning dedicated Cloudflare HTTPS tunnel...');
+        notify();
+        const tunnelUrl = await startTunnel(deployment.id, port);
+        if (tunnelUrl) {
+          liveUrl = tunnelUrl;
+        }
+      } else if (cleanHost.includes('trycloudflare.com')) {
+        liveUrl = `https://${cleanHost}/?_port=${port}`;
+      }
 
       deployment.url = liveUrl;
       deployment.step = 4;

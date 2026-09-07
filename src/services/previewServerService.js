@@ -74,12 +74,7 @@ async function launchPreviewServer(targetDir, deployment, onExpire, emitUpdate) 
 
   registerServer(deployment.id, server);
 
-  // 5. Compute public URL & provision dedicated Cloudflare quick-tunnel
-  deployment.logs.push('Provisioning dedicated Cloudflare HTTPS tunnel...');
-  emitUpdate();
-
-  const tunnelUrl = await startTunnel(deployment.id, port);
-
+  // 5. Compute public URL & reliable direct preview address
   const rawHost = (deployment.host || PUBLIC_HOST || '129.225.66.172').trim();
   let cleanHost = rawHost
     .replace(/^https?:\/\//i, '')
@@ -90,9 +85,21 @@ async function launchPreviewServer(targetDir, deployment, onExpire, emitUpdate) 
     cleanHost = '129.225.66.172';
   }
 
-  const liveUrl = tunnelUrl || (cleanHost.includes('trycloudflare.com')
-    ? `https://${cleanHost}/?_port=${port}`
-    : `http://${cleanHost}:${port}`);
+  const directUrl = `http://${cleanHost}:${port}`;
+  deployment.directUrl = directUrl;
+
+  let liveUrl = directUrl;
+  if (process.env.ENABLE_CLOUDFLARE_TUNNEL === 'true') {
+    deployment.logs.push('Provisioning dedicated Cloudflare HTTPS tunnel...');
+    emitUpdate();
+    const tunnelUrl = await startTunnel(deployment.id, port);
+    if (tunnelUrl) {
+      liveUrl = tunnelUrl;
+    }
+  } else if (cleanHost.includes('trycloudflare.com')) {
+    liveUrl = `https://${cleanHost}/?_port=${port}`;
+  }
+
   deployment.url = liveUrl;
   deployment.logs.push(`✓ Live deployment URL: ${liveUrl}`);
 
